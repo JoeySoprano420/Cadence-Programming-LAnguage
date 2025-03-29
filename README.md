@@ -140,4 +140,3 @@ profile_execution -> trace("Execution block completed successfully.")
 
 ---
 
-**Cadence** is now fully rebranded, renamed, and adapted! Let me know if you'd like further extensions, tweaks, or more example code.
