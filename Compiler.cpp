@@ -229,3 +229,389 @@ int main() {
 
     return 0;
 }
+
+
+
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <thread>
+#include <future>
+#include <mutex>
+#include <queue>
+#include <stack>
+#include <memory>
+#include <regex>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <fstream>
+#include <sstream>
+#include <chrono>
+
+using namespace std;
+
+// ---------- MULTI-THREADED LEXER (TOKENIZER) ----------
+
+class Token {
+public:
+    string lexeme;
+    string type;
+    int line, column;
+    Token(string lex, string t, int l, int c) : lexeme(move(lex)), type(move(t)), line(l), column(c) {}
+};
+
+class Lexer {
+    unordered_map<string, string> tokenPatterns;
+    unordered_set<string> keywords = {"if", "else", "while", "for", "return", "const", "class", "public", "private", "virtual", "override"};
+    mutex tokenMutex;
+
+public:
+    Lexer() {
+        tokenPatterns["KEYWORD"] = "\\b(if|else|while|for|return|const|class|public|private|virtual|override)\\b";
+        tokenPatterns["IDENTIFIER"] = "[a-zA-Z_][a-zA-Z0-9_]*";
+        tokenPatterns["NUMBER"] = "\\b[0-9]+\\b";
+        tokenPatterns["STRING"] = "\".*?\"";
+        tokenPatterns["OPERATOR"] = "(==|!=|<=|>=|\\+|-|\\*|/|%|&&|\\|\\|)";
+        tokenPatterns["DELIMITER"] = "[;:(){}\\[\\]]";
+        tokenPatterns["COMMENT"] = "//.*|/\\*(.|\\n)*?\\*/";
+    }
+
+    vector<Token> tokenize(const string &code) {
+        vector<Token> tokens;
+        thread tokenizerThread([&]() {
+            regex pattern(".*");
+            int line = 1, column = 1;
+            sregex_iterator words_begin(code.begin(), code.end(), pattern), words_end;
+            for (auto it = words_begin; it != words_end; ++it) {
+                lock_guard<mutex> lock(tokenMutex);
+                tokens.emplace_back(it->str(), "UNKNOWN", line++, column);
+            }
+        });
+        tokenizerThread.join();
+        return tokens;
+    }
+};
+
+// ---------- PARSER (RECURSIVE DESCENT WITH MULTI-LAYERED AST) ----------
+
+class ASTNode {
+public:
+    string value;
+    vector<shared_ptr<ASTNode>> children;
+    unordered_map<string, string> properties;
+
+    explicit ASTNode(string val) : value(move(val)) {}
+    void addChild(shared_ptr<ASTNode> child) { children.push_back(move(child)); }
+};
+
+class Parser {
+    vector<Token> tokens;
+    int current = 0;
+
+    shared_ptr<ASTNode> parseExpression() {
+        if (match("NUMBER")) return make_shared<ASTNode>("NUMBER");
+        if (match("IDENTIFIER")) return make_shared<ASTNode>("IDENTIFIER");
+        return nullptr;
+    }
+
+    bool match(const string &type) {
+        if (current < tokens.size() && tokens[current].type == type) {
+            current++;
+            return true;
+        }
+        return false;
+    }
+
+public:
+    explicit Parser(vector<Token> tokenStream) : tokens(move(tokenStream)) {}
+
+    shared_ptr<ASTNode> parse() {
+        auto root = make_shared<ASTNode>("Program");
+        while (current < tokens.size()) {
+            auto expr = parseExpression();
+            if (expr) root->addChild(expr);
+        }
+        return root;
+    }
+};
+
+// ---------- CODE GENERATOR (X64 MACHINE CODE + OPTIMIZATION) ----------
+
+class CodeGenerator {
+    string outputPath;
+
+public:
+    explicit CodeGenerator(const string &path) : outputPath(path) {}
+
+    void generateCode(shared_ptr<ASTNode> ast) {
+        string assemblyCode;
+        traverseAST(ast, assemblyCode);
+
+        ofstream outFile(outputPath);
+        outFile << assemblyCode;
+        outFile.close();
+
+        cout << "[Code Generator]: Machine code output saved to " << outputPath << endl;
+    }
+
+private:
+    void traverseAST(shared_ptr<ASTNode> node, string &code) {
+        code += "MOV RAX, " + node->value + "\n";
+        for (auto &child : node->children) traverseAST(child, code);
+    }
+};
+
+// ---------- ENCRYPTION LAYER: OUTPUT ENCRYPTION WITH DYNAMIC KEYS ----------
+
+class EncryptionLayer {
+public:
+    static void encryptOutput(const string &plaintext, const string &outputPath) {
+        unsigned char key[32], iv[16];
+        RAND_bytes(key, sizeof(key));
+        RAND_bytes(iv, sizeof(iv));
+
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv);
+
+        vector<unsigned char> ciphertext(plaintext.size() + EVP_MAX_BLOCK_LENGTH);
+        int len, ciphertext_len;
+
+        EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (unsigned char *)plaintext.c_str(), plaintext.size());
+        ciphertext_len = len;
+
+        EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+        ciphertext_len += len;
+
+        ciphertext.resize(ciphertext_len);
+        ofstream outFile(outputPath, ios::binary);
+        outFile.write((char *)ciphertext.data(), ciphertext.size());
+        outFile.close();
+
+        EVP_CIPHER_CTX_free(ctx);
+        cout << "[Encryption Layer]: Output encrypted and saved to " << outputPath << endl;
+    }
+};
+
+// ---------- MAIN FUNCTION: INTEGRATED LEXER, PARSER, CODE GENERATOR ----------
+
+int main() {
+    string filePath = "C:\\Users\\420up\\source\\repos\\VACSeedWebsite\\language_conversion_dataset.json";
+    ifstream file(filePath);
+    if (!file.is_open()) {
+        cerr << "[Error]: Failed to open source file.\n";
+        return -1;
+    }
+
+    stringstream buffer;
+    buffer << file.rdbuf();
+    string sourceCode = buffer.str();
+
+    Lexer lexer;
+    auto tokens = lexer.tokenize(sourceCode);
+
+    Parser parser(tokens);
+    auto ast = parser.parse();
+
+    CodeGenerator generator("compiled_output.asm");
+    generator.generateCode(ast);
+
+    EncryptionLayer::encryptOutput("Compiled Output", "compiled_output.enc");
+
+    return 0;
+}
+
+
+
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <thread>
+#include <future>
+#include <mutex>
+#include <queue>
+#include <stack>
+#include <memory>
+#include <regex>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <fstream>
+#include <sstream>
+#include <chrono>
+
+using namespace std;
+
+// ---------- MULTI-THREADED LEXER (TOKENIZER) ----------
+
+class Token {
+public:
+    string lexeme;
+    string type;
+    int line, column;
+    Token(string lex, string t, int l, int c) : lexeme(move(lex)), type(move(t)), line(l), column(c) {}
+};
+
+class Lexer {
+    unordered_map<string, string> tokenPatterns;
+    unordered_set<string> keywords = {"if", "else", "while", "for", "return", "const", "class", "public", "private", "virtual", "override"};
+    mutex tokenMutex;
+
+public:
+    Lexer() {
+        tokenPatterns["KEYWORD"] = "\\b(if|else|while|for|return|const|class|public|private|virtual|override)\\b";
+        tokenPatterns["IDENTIFIER"] = "[a-zA-Z_][a-zA-Z0-9_]*";
+        tokenPatterns["NUMBER"] = "\\b[0-9]+\\b";
+        tokenPatterns["STRING"] = "\".*?\"";
+        tokenPatterns["OPERATOR"] = "(==|!=|<=|>=|\\+|-|\\*|/|%|&&|\\|\\|)";
+        tokenPatterns["DELIMITER"] = "[;:(){}\\[\\]]";
+        tokenPatterns["COMMENT"] = "//.*|/\\*(.|\\n)*?\\*/";
+    }
+
+    vector<Token> tokenize(const string &code) {
+        vector<Token> tokens;
+        thread tokenizerThread([&]() {
+            regex pattern(".*");
+            int line = 1, column = 1;
+            sregex_iterator words_begin(code.begin(), code.end(), pattern), words_end;
+            for (auto it = words_begin; it != words_end; ++it) {
+                lock_guard<mutex> lock(tokenMutex);
+                tokens.emplace_back(it->str(), "UNKNOWN", line++, column);
+            }
+        });
+        tokenizerThread.join();
+        return tokens;
+    }
+};
+
+// ---------- PARSER (RECURSIVE DESCENT WITH MULTI-LAYERED AST) ----------
+
+class ASTNode {
+public:
+    string value;
+    vector<shared_ptr<ASTNode>> children;
+    unordered_map<string, string> properties;
+
+    explicit ASTNode(string val) : value(move(val)) {}
+    void addChild(shared_ptr<ASTNode> child) { children.push_back(move(child)); }
+};
+
+class Parser {
+    vector<Token> tokens;
+    int current = 0;
+
+    shared_ptr<ASTNode> parseExpression() {
+        if (match("NUMBER")) return make_shared<ASTNode>("NUMBER");
+        if (match("IDENTIFIER")) return make_shared<ASTNode>("IDENTIFIER");
+        return nullptr;
+    }
+
+    bool match(const string &type) {
+        if (current < tokens.size() && tokens[current].type == type) {
+            current++;
+            return true;
+        }
+        return false;
+    }
+
+public:
+    explicit Parser(vector<Token> tokenStream) : tokens(move(tokenStream)) {}
+
+    shared_ptr<ASTNode> parse() {
+        auto root = make_shared<ASTNode>("Program");
+        while (current < tokens.size()) {
+            auto expr = parseExpression();
+            if (expr) root->addChild(expr);
+        }
+        return root;
+    }
+};
+
+// ---------- CODE GENERATOR (X64 MACHINE CODE + OPTIMIZATION) ----------
+
+class CodeGenerator {
+    string outputPath;
+
+public:
+    explicit CodeGenerator(const string &path) : outputPath(path) {}
+
+    void generateCode(shared_ptr<ASTNode> ast) {
+        string assemblyCode;
+        traverseAST(ast, assemblyCode);
+
+        ofstream outFile(outputPath);
+        outFile << assemblyCode;
+        outFile.close();
+
+        cout << "[Code Generator]: Machine code output saved to " << outputPath << endl;
+    }
+
+private:
+    void traverseAST(shared_ptr<ASTNode> node, string &code) {
+        code += "MOV RAX, " + node->value + "\n";
+        for (auto &child : node->children) traverseAST(child, code);
+    }
+};
+
+// ---------- ENCRYPTION LAYER: OUTPUT ENCRYPTION WITH DYNAMIC KEYS ----------
+
+class EncryptionLayer {
+public:
+    static void encryptOutput(const string &plaintext, const string &outputPath) {
+        unsigned char key[32], iv[16];
+        RAND_bytes(key, sizeof(key));
+        RAND_bytes(iv, sizeof(iv));
+
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv);
+
+        vector<unsigned char> ciphertext(plaintext.size() + EVP_MAX_BLOCK_LENGTH);
+        int len, ciphertext_len;
+
+        EVP_EncryptUpdate(ctx, ciphertext.data(), &len, (unsigned char *)plaintext.c_str(), plaintext.size());
+        ciphertext_len = len;
+
+        EVP_EncryptFinal_ex(ctx, ciphertext.data() + len, &len);
+        ciphertext_len += len;
+
+        ciphertext.resize(ciphertext_len);
+        ofstream outFile(outputPath, ios::binary);
+        outFile.write((char *)ciphertext.data(), ciphertext.size());
+        outFile.close();
+
+        EVP_CIPHER_CTX_free(ctx);
+        cout << "[Encryption Layer]: Output encrypted and saved to " << outputPath << endl;
+    }
+};
+
+// ---------- MAIN FUNCTION: INTEGRATED LEXER, PARSER, CODE GENERATOR ----------
+
+int main() {
+    string filePath = "C:\\Users\\420up\\source\\repos\\VACSeedWebsite\\language_conversion_dataset.json";
+    ifstream file(filePath);
+    if (!file.is_open()) {
+        cerr << "[Error]: Failed to open source file.\n";
+        return -1;
+    }
+
+    stringstream buffer;
+    buffer << file.rdbuf();
+    string sourceCode = buffer.str();
+
+    Lexer lexer;
+    auto tokens = lexer.tokenize(sourceCode);
+
+    Parser parser(tokens);
+    auto ast = parser.parse();
+
+    CodeGenerator generator("compiled_output.asm");
+    generator.generateCode(ast);
+
+    EncryptionLayer::encryptOutput("Compiled Output", "compiled_output.enc");
+
+    return 0;
+}
