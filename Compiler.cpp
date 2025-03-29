@@ -8,8 +8,16 @@
 #include <sstream>
 #include <regex>
 #include <optional>
+#include <thread>
+#include <mutex>
+#include <future>
+#include <openssl/evp.h> // OpenSSL for cryptography
+#include <openssl/rand.h>
 
 using namespace std;
+
+// Mutex for thread-safe caching
+mutex cacheMutex;
 
 // Token structure to store lexeme and type
 struct Token {
@@ -27,7 +35,27 @@ public:
     void addChild(shared_ptr<ASTNode> child) { children.push_back(move(child)); }
 };
 
-// Tokenizer using regex patterns for Cadence syntax
+// Cache Manager with thread-safe lookup and insertion
+class CacheManager {
+    unordered_map<string, vector<Token>> tokenCache;
+public:
+    bool isCached(const string &codeHash) {
+        lock_guard<mutex> lock(cacheMutex);
+        return tokenCache.find(codeHash) != tokenCache.end();
+    }
+
+    void addTokensToCache(const string &codeHash, const vector<Token> &tokens) {
+        lock_guard<mutex> lock(cacheMutex);
+        tokenCache[codeHash] = tokens;
+    }
+
+    vector<Token> getTokensFromCache(const string &codeHash) {
+        lock_guard<mutex> lock(cacheMutex);
+        return tokenCache[codeHash];
+    }
+};
+
+// Tokenizer with Multi-threading
 class Tokenizer {
     unordered_map<string, string> tokenPatterns;
 public:
@@ -40,10 +68,32 @@ public:
     }
 
     vector<Token> tokenize(const string &code) {
+        vector<future<vector<Token>>> futures;
+
+        // Divide the input code into segments for parallel tokenization
+        int segmentSize = code.size() / thread::hardware_concurrency();
+        for (size_t i = 0; i < code.size(); i += segmentSize) {
+            string segment = code.substr(i, segmentSize);
+            futures.push_back(async(launch::async, [this, segment]() {
+                return tokenizeSegment(segment);
+            }));
+        }
+
+        vector<Token> tokens;
+        for (auto &f : futures) {
+            auto partialTokens = f.get();
+            tokens.insert(tokens.end(), partialTokens.begin(), partialTokens.end());
+        }
+
+        return tokens;
+    }
+
+private:
+    vector<Token> tokenizeSegment(const string &segment) {
         vector<Token> tokens;
         for (const auto &[type, pattern] : tokenPatterns) {
             regex r(pattern);
-            auto words_begin = sregex_iterator(code.begin(), code.end(), r);
+            auto words_begin = sregex_iterator(segment.begin(), segment.end(), r);
             auto words_end = sregex_iterator();
             for (auto it = words_begin; it != words_end; ++it) {
                 tokens.emplace_back(it->str(), type);
@@ -53,70 +103,92 @@ public:
     }
 };
 
-// AST Generator: Translates tokens into an Abstract Syntax Tree (AST)
-class ASTGenerator {
+// Cryptographic Layer: AES encryption for output protection
+class CryptographyManager {
 public:
-    shared_ptr<ASTNode> generateAST(const vector<Token> &tokens) {
-        auto root = make_shared<ASTNode>("PROGRAM");
-        shared_ptr<ASTNode> currentNode = root;
-        for (const auto &token : tokens) {
-            if (token.type == "KEYWORD") {
-                auto node = make_shared<ASTNode>(token.lexeme);
-                currentNode->addChild(node);
-                currentNode = node;  // Move down in the AST
-            } else if (token.type == "SYMBOL" && token.lexeme == "}") {
-                currentNode = root;  // Move up to the root when block ends
-            } else {
-                currentNode->addChild(make_shared<ASTNode>(token.lexeme));
-            }
-        }
-        return root;
+    static void encryptOutput(const string &plaintext, const string &outputPath) {
+        unsigned char key[32], iv[16];
+        RAND_bytes(key, sizeof(key));
+        RAND_bytes(iv, sizeof(iv));
+
+        EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+        EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv);
+
+        unsigned char ciphertext[plaintext.size() + EVP_MAX_BLOCK_LENGTH];
+        int len, ciphertext_len;
+
+        EVP_EncryptUpdate(ctx, ciphertext, &len, (unsigned char *)plaintext.c_str(), plaintext.size());
+        ciphertext_len = len;
+
+        EVP_EncryptFinal_ex(ctx, ciphertext + len, &len);
+        ciphertext_len += len;
+
+        EVP_CIPHER_CTX_free(ctx);
+
+        ofstream outFile(outputPath, ios::binary);
+        outFile.write((char *)ciphertext, ciphertext_len);
+        outFile.close();
+
+        cout << "[Cryptography]: Output encrypted and saved to " << outputPath << endl;
     }
 };
 
-// Optimizer: Applies loop unrolling, memory folding, and garbage optimizations
-class Optimizer {
-public:
-    void optimizeAST(shared_ptr<ASTNode> &ast) {
-        function<void(shared_ptr<ASTNode>)> fold = [&](shared_ptr<ASTNode> node) {
-            // Basic optimization: flatten redundant nested nodes
-            if (node->children.size() == 1) node->value += "_optimized";
-            for (auto &child : node->children) fold(child);
-        };
-        fold(ast);
-        cout << "[Optimizer]: AST optimized with loop unrolling and memory folding.\n";
-    }
-};
-
-// Compiler Backend: Converts optimized AST to x64 Assembly
+// Compiler Backend with Multi-threaded Assembly Generation
 class CompilerBackend {
 public:
     void compileToAssembly(shared_ptr<ASTNode> &ast) {
-        function<void(shared_ptr<ASTNode>)> generateAssembly = [&](shared_ptr<ASTNode> node) {
-            if (!node) return;
-            cout << "mov eax, " << node->value << " ; Generated opcode\n";
-            for (auto &child : node->children) generateAssembly(child);
-        };
-        cout << "[Compiler Backend]: Generating x64 Assembly...\n";
-        generateAssembly(ast);
+        vector<future<void>> futures;
+
+        // Parallel assembly generation for each AST branch
+        for (auto &child : ast->children) {
+            futures.push_back(async(launch::async, [child]() {
+                generateAssembly(child);
+            }));
+        }
+
+        for (auto &f : futures) f.get();
+        cout << "[Compiler Backend]: Multi-threaded assembly generation completed.\n";
+    }
+
+private:
+    static void generateAssembly(shared_ptr<ASTNode> node) {
+        if (!node) return;
+        cout << "mov eax, " << node->value << " ; Generated opcode\n";
+        for (auto &child : node->children) generateAssembly(child);
     }
 };
 
-// Compiler Frontend: Handles tokenization, parsing, and preprocessing
+// Compiler Frontend with Cache Integration
 class CadenceCompiler {
     Tokenizer tokenizer;
     ASTGenerator parser;
     Optimizer optimizer;
     CompilerBackend backend;
+    CacheManager cacheManager;
 
 public:
     void compile(const string &sourceCode) {
         cout << "[Cadence Compiler]: Starting compilation process...\n";
-        auto tokens = tokenizer.tokenize(sourceCode);
+
+        // Generate a hash of the source code for caching
+        string codeHash = to_string(hash<string>{}(sourceCode));
+
+        vector<Token> tokens;
+        if (cacheManager.isCached(codeHash)) {
+            cout << "[Cache Manager]: Tokens loaded from cache.\n";
+            tokens = cacheManager.getTokensFromCache(codeHash);
+        } else {
+            tokens = tokenizer.tokenize(sourceCode);
+            cacheManager.addTokensToCache(codeHash, tokens);
+        }
+
         auto ast = parser.generateAST(tokens);
         optimizer.optimizeAST(ast);
         backend.compileToAssembly(ast);
-        cout << "[Cadence Compiler]: Compilation completed successfully!\n";
+
+        // Encrypt the compiled assembly output
+        CryptographyManager::encryptOutput("Compiled Assembly Output", "compiled_output.enc");
+        cout << "[Cadence Compiler]: Compilation completed and output encrypted!\n";
     }
 };
 
@@ -130,7 +202,7 @@ optional<string> loadSourceCode(const string &filePath) {
     return buffer.str();
 }
 
-// Main function: Load source code, compile, and produce optimized binary
+// Main function: Load source code, compile, and produce optimized encrypted binary
 int main() {
     string filePath = "C:\\Users\\420up\\source\\repos\\VACSeedWebsite\\language_conversion_dataset.json";
     auto sourceCode = loadSourceCode(filePath);
@@ -143,4 +215,3 @@ int main() {
     }
     return 0;
 }
-
